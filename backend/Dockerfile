@@ -1,15 +1,16 @@
 FROM node:20-slim
 
-# Install dependencies
-RUN apt-get update && apt-get install -y \
-    yt-dlp \
-    ffmpeg
+# Install system deps
+RUN apt-get update && apt-get install -y yt-dlp ffmpeg
 
-WORKDIR /app
+# IMPORTANT: move into backend folder
+WORKDIR /app/backend
 
-COPY package*.json ./
+# Copy ONLY backend files
+COPY backend/package*.json ./
+
 RUN npm install
 
-COPY . .
+COPY backend/ .
 
 CMD ["node", "src/workers/convert.worker.js"]
