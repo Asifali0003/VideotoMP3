@@ -1,12 +1,19 @@
 import { Worker } from "bullmq";
+import IORedis from "ioredis";
 import { processVideo } from "../services/convert.service.js";
 import connectDB from "../config/database.js";
 
-// ✅ Ensure DB connection before worker starts
+// ✅ Connect DB first
 await connectDB();
 
+// ✅ Upstash Redis connection
+const connection = new IORedis(process.env.REDIS_URL, {
+  maxRetriesPerRequest: null,
+  tls: {}, // 🔥 required for Upstash
+});
+
 const worker = new Worker(
-  "conversion", // ⚠️ MUST MATCH QUEUE NAME
+  "conversion", // MUST match queue name
   async (job) => {
     try {
       const { id, url } = job.data;
@@ -16,19 +23,21 @@ const worker = new Worker(
       }
 
       await processVideo(id, url);
+
     } catch (err) {
       console.log("❌ Worker processing error:", err.message);
-      throw err; // 🔥 Important: lets BullMQ mark job as failed
+      throw err; // important for retry
     }
   },
   {
-    connection: {
-      host: "127.0.0.1",
-      port: 6379,
-    },
+    connection,
 
-    // 🔥 PRO SETTINGS (important)
-    concurrency: 2, // process 2 jobs at same time
+    // 🔥 Production settings
+    concurrency: 2,
+    limiter: {
+      max: 5,       // max jobs
+      duration: 1000, // per second
+    },
   }
 );
 
@@ -51,7 +60,6 @@ worker.on("failed", (job, err) => {
   console.log("❌ Job failed:", job?.id, err.message);
 });
 
-// 🔥 Optional but VERY useful
 worker.on("error", (err) => {
   console.log("🚨 Worker error:", err.message);
 });
