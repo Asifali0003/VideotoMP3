@@ -1,120 +1,140 @@
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import os from "os";
 import imagekit from "../config/imagekit.js";
 import ConversionModel from "../models/conversion.model.js";
 import { getVideoMetadata } from "../utils/metaData.js";
 
-// ✅ Normalize Shorts
+// ✅ Normalize YouTube Shorts URL
 const normalizeYouTubeURL = (url) => {
   if (url.includes("shorts")) {
-    const id = url.split("shorts/")[1].split("?")[0];
+    const id = url.split("shorts/")[1]?.split("?")[0];
     return `https://www.youtube.com/watch?v=${id}`;
   }
   return url;
 };
 
 export const processVideo = async (id, url) => {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const cleanUrl = normalizeYouTubeURL(url);
+  try {
+    const cleanUrl = normalizeYouTubeURL(url);
 
-      // 🔥 Fetch metadata in worker (reliable)
-      let meta = {};
-      try {
-        meta = await getVideoMetadata(cleanUrl);
-      } catch {
-        console.log("Metadata fetch failed in worker");
-      }
+    // 🔥 Step 1: Fetch metadata
+    let meta = {};
+    try {
+      meta = await getVideoMetadata(cleanUrl);
+    } catch {
+      console.log("⚠️ Metadata fetch failed");
+    }
+
+    await ConversionModel.findByIdAndUpdate(id, {
+      status: "processing",
+      title: meta.title || "Unknown Title",
+      thumbnail: meta.thumbnail || "",
+      duration: meta.duration || 0,
+    });
+
+    // ✅ Step 2: Use temp directory (cloud-safe)
+    const downloadsDir = path.join(os.tmpdir(), "downloads");
+    if (!fs.existsSync(downloadsDir)) {
+      fs.mkdirSync(downloadsDir, { recursive: true });
+    }
+
+    // ✅ Step 3: yt-dlp (Linux compatible)
+    const ytDlpPath = "yt-dlp";
+    const outputPath = path.join(downloadsDir, `${id}.%(ext)s`);
+
+    const processDl = spawn(ytDlpPath, [
+      "-x",
+      "--audio-format", "mp3",
+      "--no-playlist",
+      "--restrict-filenames",
+      "-o", outputPath,
+      cleanUrl,
+    ]);
+
+    // ⏱ Timeout (5 min)
+    const timeout = setTimeout(() => {
+      processDl.kill("SIGKILL");
+    }, 1000 * 60 * 5);
+
+    // 📊 Logs
+    processDl.stdout.on("data", (data) => {
+      console.log("yt-dlp:", data.toString());
+    });
+
+    processDl.stderr.on("data", (data) => {
+      console.log("yt-dlp error:", data.toString());
+    });
+
+    // ❌ Process error
+    processDl.on("error", async (err) => {
+      clearTimeout(timeout);
 
       await ConversionModel.findByIdAndUpdate(id, {
-        status: "processing",
-        title: meta.title || "Unknown Title",
-        thumbnail: meta.thumbnail || "",
-        duration: meta.duration || 0,
+        status: "failed",
+        error: err.message,
       });
 
-      const downloadsDir = path.join(process.cwd(), "downloads");
+      console.log("❌ Spawn error:", err.message);
+    });
 
-      if (!fs.existsSync(downloadsDir)) {
-        fs.mkdirSync(downloadsDir);
+    // ✅ Process complete
+    processDl.on("close", async (code) => {
+      clearTimeout(timeout);
+
+      if (code !== 0) {
+        await ConversionModel.findByIdAndUpdate(id, {
+          status: "failed",
+          error: "yt-dlp failed",
+        });
+        return;
       }
 
-      const ytDlpPath = path.join(process.cwd(), "yt-dlp.exe");
+      try {
+        const finalPath = path.join(downloadsDir, `${id}.mp3`);
 
-      const processDl = spawn(ytDlpPath, [
-        "-x",
-        "--audio-format", "mp3",
-        "--no-playlist",
-        "--restrict-filenames",
-        "-o", `${downloadsDir}/${id}.%(ext)s`,
-        cleanUrl,
-      ]);
-
-      // ⏱ Timeout (5 min)
-      const timeout = setTimeout(() => {
-        processDl.kill("SIGKILL");
-      }, 1000 * 60 * 5);
-
-      processDl.stdout.on("data", (data) => {
-        console.log("yt-dlp:", data.toString());
-      });
-
-      processDl.stderr.on("data", (data) => {
-        console.log("yt-dlp error:", data.toString());
-      });
-
-      processDl.on("close", async (code) => {
-        clearTimeout(timeout);
-
-        if (code !== 0) {
-          await ConversionModel.findByIdAndUpdate(id, {
-            status: "failed",
-            error: "yt-dlp failed",
-          });
-          return reject(new Error("yt-dlp failed"));
+        if (!fs.existsSync(finalPath)) {
+          throw new Error("MP3 file not found");
         }
 
-        try {
-          const files = fs.readdirSync(downloadsDir);
-          const mp3File = files.find((file) => file.startsWith(id));
+        const fileBuffer = await fs.promises.readFile(finalPath);
 
-          if (!mp3File) throw new Error("MP3 file not found");
+        // ☁️ Upload to ImageKit
+        const response = await imagekit.upload({
+          file: fileBuffer,
+          fileName: `${id}.mp3`,
+          folder: "/audio-files",
+        });
 
-          const finalPath = path.join(downloadsDir, mp3File);
+        // 🧹 Cleanup
+        await fs.promises.unlink(finalPath);
 
-          const fileBuffer = await fs.promises.readFile(finalPath);
+        // ✅ Update DB
+        await ConversionModel.findByIdAndUpdate(id, {
+          status: "completed",
+          fileUrl: response.url,
+          fileId: response.fileId,
+        });
 
-          const response = await imagekit.upload({
-            file: fileBuffer,
-            fileName: `${id}.mp3`,
-            folder: "/audio-files",
-          });
+        console.log("✅ Conversion completed:", id);
 
-          await fs.promises.unlink(finalPath);
+      } catch (err) {
+        await ConversionModel.findByIdAndUpdate(id, {
+          status: "failed",
+          error: err.message,
+        });
 
-          await ConversionModel.findByIdAndUpdate(id, {
-            status: "completed",
-            fileUrl: response.url,
-            fileId: response.fileId,
-          });
+        console.log("❌ Processing error:", err.message);
+      }
+    });
 
-          console.log("✅ Conversion completed:", id);
+  } catch (err) {
+    console.log("❌ PROCESS ERROR:", err.message);
 
-          resolve();
-        } catch (err) {
-          await ConversionModel.findByIdAndUpdate(id, {
-            status: "failed",
-            error: err.message,
-          });
-
-          reject(err);
-        }
-      });
-
-    } catch (err) {
-      console.log("PROCESS ERROR:", err.message);
-      reject(err);
-    }
-  });
+    await ConversionModel.findByIdAndUpdate(id, {
+      status: "failed",
+      error: err.message,
+    });
+  }
 };

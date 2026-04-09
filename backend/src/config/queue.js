@@ -1,9 +1,12 @@
 import { Queue } from "bullmq";
+import IORedis from "ioredis";
 
-export const conversionQueue = new Queue("conversion", {
-  connection: {
-    host: process.env.REDIS_HOST || "127.0.0.1",
-    port: Number(process.env.REDIS_PORT) || 6379,
-  },
+
+const connection = new IORedis(process.env.REDIS_URL, {
+  maxRetriesPerRequest: null,
+  tls: {}, // 🔥 required for Upstash
 });
 
+export const conversionQueue = new Queue("conversion", {
+  connection,
+});
