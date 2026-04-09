@@ -6,7 +6,7 @@ import imagekit from "../config/imagekit.js";
 import ConversionModel from "../models/conversion.model.js";
 import { getVideoMetadata } from "../utils/metaData.js";
 
-// ✅ Normalize YouTube Shorts URL
+// Normalize Shorts URL
 const normalizeYouTubeURL = (url) => {
   if (url.includes("shorts")) {
     const id = url.split("shorts/")[1]?.split("?")[0];
@@ -16,40 +16,54 @@ const normalizeYouTubeURL = (url) => {
 };
 
 export const processVideo = async (id, url) => {
-  try {
-    const cleanUrl = normalizeYouTubeURL(url);
+  const downloadsDir = path.join(os.tmpdir(), "downloads");
+  const cleanUrl = normalizeYouTubeURL(url);
 
-    // 🔥 Step 1: Fetch metadata
+  try {
+    // ✅ Ensure temp dir exists
+    if (!fs.existsSync(downloadsDir)) {
+      fs.mkdirSync(downloadsDir, { recursive: true });
+    }
+
+    // 🔥 Step 1: Metadata (non-blocking)
     let meta = {};
     try {
       meta = await getVideoMetadata(cleanUrl);
     } catch {
-      console.log("⚠️ Metadata fetch failed");
+      console.log("⚠️ Metadata skipped");
     }
 
     await ConversionModel.findByIdAndUpdate(id, {
       status: "processing",
       title: meta.title || "Unknown Title",
-      thumbnail: meta.thumbnail || "",
+      thumbnail: meta.thumbnail || null, // ✅ FIXED
       duration: meta.duration || 0,
     });
 
-    // ✅ Step 2: Use temp directory (cloud-safe)
-    const downloadsDir = path.join(os.tmpdir(), "downloads");
-    if (!fs.existsSync(downloadsDir)) {
-      fs.mkdirSync(downloadsDir, { recursive: true });
-    }
+    // 🔥 Step 2: Setup paths
+    const outputTemplate = path.join(downloadsDir, `${id}.%(ext)s`);
+    const finalPath = path.join(downloadsDir, `${id}.mp3`);
 
-    // ✅ Step 3: yt-dlp (Linux compatible)
-    const ytDlpPath = "yt-dlp";
-    const outputPath = path.join(downloadsDir, `${id}.%(ext)s`);
+    // ✅ Use local binaries (Render compatible)
+    const ytDlpPath = "./yt-dlp";
+    const ffmpegPath = "./ffmpeg";
 
+    // 🔥 Step 3: Spawn yt-dlp
     const processDl = spawn(ytDlpPath, [
       "-x",
       "--audio-format", "mp3",
+      "--audio-quality", "0",
       "--no-playlist",
       "--restrict-filenames",
-      "-o", outputPath,
+
+      // ✅ Improve reliability
+      "--force-ipv4",
+      "--no-check-certificates",
+
+      // ✅ Use local ffmpeg
+      "--ffmpeg-location", ffmpegPath,
+
+      "-o", outputTemplate,
       cleanUrl,
     ]);
 
@@ -58,7 +72,7 @@ export const processVideo = async (id, url) => {
       processDl.kill("SIGKILL");
     }, 1000 * 60 * 5);
 
-    // 📊 Logs
+    // 📊 Logs (useful for debugging & progress)
     processDl.stdout.on("data", (data) => {
       console.log("yt-dlp:", data.toString());
     });
@@ -67,7 +81,7 @@ export const processVideo = async (id, url) => {
       console.log("yt-dlp error:", data.toString());
     });
 
-    // ❌ Process error
+    // ❌ Spawn error
     processDl.on("error", async (err) => {
       clearTimeout(timeout);
 
@@ -92,8 +106,7 @@ export const processVideo = async (id, url) => {
       }
 
       try {
-        const finalPath = path.join(downloadsDir, `${id}.mp3`);
-
+        // ✅ Ensure file exists
         if (!fs.existsSync(finalPath)) {
           throw new Error("MP3 file not found");
         }
@@ -107,7 +120,7 @@ export const processVideo = async (id, url) => {
           folder: "/audio-files",
         });
 
-        // 🧹 Cleanup
+        // 🧹 Cleanup (VERY IMPORTANT)
         await fs.promises.unlink(finalPath);
 
         // ✅ Update DB
@@ -120,12 +133,18 @@ export const processVideo = async (id, url) => {
         console.log("✅ Conversion completed:", id);
 
       } catch (err) {
+        // ❌ Handle processing error
         await ConversionModel.findByIdAndUpdate(id, {
           status: "failed",
           error: err.message,
         });
 
         console.log("❌ Processing error:", err.message);
+
+        // 🧹 Cleanup if file exists
+        if (fs.existsSync(finalPath)) {
+          await fs.promises.unlink(finalPath);
+        }
       }
     });
 
