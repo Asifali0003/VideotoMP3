@@ -5,18 +5,24 @@ import conversionRouter from "./routes/conversion.routes.js";
 
 const app = express();
 
-app.use(cors(
-    {
-        origin: "http://localhost:5173",
-        credentials: true,
-    }
-));
+// ======================
+// 🔐 CORS CONFIG
+// ======================
+app.use(cors({
+  origin: "*", // later change to Vercel domain
+  methods: ["GET", "POST", "PUT", "DELETE"],
+}));
+
 app.use(express.json());
 
-// static downloads
+// ======================
+// 📦 Static downloads
+// ======================
 app.use("/downloads", express.static(path.resolve("downloads")));
 
-// routes
-app.use("/convert", conversionRouter);
+// ======================
+// 🚀 API ROUTES
+// ======================
+app.use("/api", conversionRouter);
 
 export default app;

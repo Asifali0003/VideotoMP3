@@ -1,25 +1,31 @@
-import axios from 'axios';
+import axios from "axios";
+
+// ✅ use env variable from Vite
+const BASE_URL = import.meta.env.VITE_API_URL;
 
 const api = axios.create({
-    baseURL: 'http://localhost:3000',
-    withCredentials: true,
-})
+  baseURL: `${BASE_URL}/api`,
+  withCredentials: false,
+});
 
-
+// 🎧 Convert video → audio request
 export const convertAudio = async (url) => {
-    try {
-        const response = await api.post('/convert', { url });
-        return response.data;
-    } catch (error) {
-        console.error(error);
-    }
-}
+  try {
+    const response = await api.post("/convert", { url });
+    return response.data;
+  } catch (error) {
+    console.error("convertAudio error:", error.response?.data || error.message);
+    throw error;
+  }
+};
 
+// 📊 Get conversion status
 export const getConversionStatus = async (id) => {
-    try {
-        const response = await api.get(`/convert/${id}`);    
-        return response.data;
-    } catch (error) {
-        console.error(error);
-    }
-}   
+  try {
+    const response = await api.get(`/status/${id}`);
+    return response.data;
+  } catch (error) {
+    console.error("status error:", error.response?.data || error.message);
+    throw error;
+  }
+};
