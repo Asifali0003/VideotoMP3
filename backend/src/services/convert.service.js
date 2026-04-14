@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -6,6 +6,9 @@ import imagekit from "../config/imagekit.js";
 import ConversionModel from "../models/conversion.model.js";
 import { getVideoMetadata } from "../utils/metaData.js";
 
+// ======================
+// 🔗 Normalize URL
+// ======================
 const normalizeYouTubeURL = (url) => {
   if (url.includes("shorts")) {
     const id = url.split("shorts/")[1]?.split("?")[0];
@@ -18,24 +21,34 @@ export const processVideo = async (id, url) => {
   const downloadsDir = path.join(os.tmpdir(), "downloads");
   const cleanUrl = normalizeYouTubeURL(url);
 
-  const ytDlpPath = "yt-dlp";     // ✅ FIXED
-  const ffmpegPath = "ffmpeg";   // ✅ FIXED
-
-  let finalPath = path.join(downloadsDir, `${id}.mp3`);
-
   try {
-    console.log(`🚀 Processing job ${id}`);
+    console.log(`\n🚀 START JOB: ${id}`);
+    console.log(`🔗 URL: ${cleanUrl}`);
 
-    // ✅ Ensure temp dir
+    // ======================
+    // 🔥 VERIFY BINARIES
+    // ======================
+    try {
+      console.log("🔍 yt-dlp:", execSync("which yt-dlp").toString().trim());
+      console.log("🔍 ffmpeg:", execSync("which ffmpeg").toString().trim());
+    } catch (err) {
+      throw new Error("yt-dlp or ffmpeg not installed");
+    }
+
+    // ======================
+    // 📁 Ensure temp dir
+    // ======================
     await fs.promises.mkdir(downloadsDir, { recursive: true });
 
-    // 🔥 Metadata (fast + safe)
+    // ======================
+    // 🔥 Metadata (safe)
+    // ======================
     let meta = {};
     try {
       meta = await Promise.race([
         getVideoMetadata(cleanUrl),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("meta timeout")), 5000)
+          setTimeout(() => reject(new Error("Metadata timeout")), 5000)
         ),
       ]);
     } catch {
@@ -49,10 +62,17 @@ export const processVideo = async (id, url) => {
       duration: meta.duration || 0,
     });
 
+    // ======================
+    // 📦 Setup paths
+    // ======================
     const outputTemplate = path.join(downloadsDir, `${id}.%(ext)s`);
 
-    // 🔥 Spawn yt-dlp safely
-    const processDl = spawn(ytDlpPath, [
+    // ======================
+    // 🔥 Spawn yt-dlp
+    // ======================
+    console.log("⬇️ Starting download...");
+
+    const processDl = spawn("yt-dlp", [
       "-x",
       "--audio-format", "mp3",
       "--audio-quality", "0",
@@ -60,17 +80,12 @@ export const processVideo = async (id, url) => {
       "--restrict-filenames",
       "--force-ipv4",
       "--no-check-certificates",
-      "--ffmpeg-location", ffmpegPath,
+      "--ffmpeg-location", "ffmpeg",
       "-o", outputTemplate,
       cleanUrl,
     ]);
 
     let errorOutput = "";
-
-    // ⏱ Timeout (reduced)
-    const timeout = setTimeout(() => {
-      processDl.kill("SIGKILL");
-    }, 1000 * 60 * 3); // 3 min
 
     processDl.stdout.on("data", (data) => {
       console.log(`📊 ${id}:`, data.toString());
@@ -80,59 +95,89 @@ export const processVideo = async (id, url) => {
       errorOutput += data.toString();
     });
 
-    // ❌ Spawn fail (binary missing etc.)
-    processDl.on("error", async (err) => {
-      clearTimeout(timeout);
+    // ⏱ Timeout
+    const timeout = setTimeout(() => {
+      processDl.kill("SIGKILL");
+      console.error("⏱ Download timeout");
+    }, 1000 * 60 * 3);
 
-      console.error("❌ Spawn error:", err.message);
-
-      await ConversionModel.findByIdAndUpdate(id, {
-        status: "failed",
-        error: "yt-dlp not found or failed",
-      });
-    });
-
-    // ✅ Wrap in promise (VERY IMPORTANT FIX)
+    // ======================
+    // 🔥 WAIT FOR PROCESS
+    // ======================
     await new Promise((resolve, reject) => {
+      processDl.on("error", async (err) => {
+        clearTimeout(timeout);
+
+        console.error("❌ Spawn error:", err.message);
+
+        await ConversionModel.findByIdAndUpdate(id, {
+          status: "failed",
+          error: err.message,
+        });
+
+        reject(err);
+      });
+
       processDl.on("close", async (code) => {
         clearTimeout(timeout);
+
+        console.log(`📦 yt-dlp exited with code: ${code}`);
 
         if (code !== 0) {
           console.error("❌ yt-dlp failed:", errorOutput);
 
           await ConversionModel.findByIdAndUpdate(id, {
             status: "failed",
-            error: "yt-dlp failed",
+            error: errorOutput || "yt-dlp failed",
           });
 
           return reject(new Error("yt-dlp failed"));
         }
 
         try {
-          // ✅ Ensure file exists
-          if (!fs.existsSync(finalPath)) {
-            throw new Error("MP3 file not found");
+          // ======================
+          // 🔥 FIND DOWNLOADED FILE
+          // ======================
+          const files = await fs.promises.readdir(downloadsDir);
+
+          const audioFile = files.find((file) => file.startsWith(id));
+
+          if (!audioFile) {
+            throw new Error("Audio file not found after download");
           }
+
+          const finalPath = path.join(downloadsDir, audioFile);
+
+          console.log("📁 Found file:", finalPath);
 
           const fileBuffer = await fs.promises.readFile(finalPath);
 
-          // ☁️ Upload
+          // ======================
+          // ☁️ Upload to ImageKit
+          // ======================
+          console.log("☁️ Uploading to ImageKit...");
+
           const response = await imagekit.upload({
             file: fileBuffer,
             fileName: `${id}.mp3`,
             folder: "/audio-files",
           });
 
+          console.log("✅ Upload success:", response.url);
+
           // 🧹 Cleanup
           await fs.promises.unlink(finalPath);
 
+          // ======================
+          // ✅ Update DB
+          // ======================
           await ConversionModel.findByIdAndUpdate(id, {
             status: "completed",
             fileUrl: response.url,
             fileId: response.fileId,
           });
 
-          console.log(`✅ Completed job ${id}`);
+          console.log(`🎉 JOB COMPLETED: ${id}`);
           resolve();
 
         } catch (err) {
@@ -143,17 +188,13 @@ export const processVideo = async (id, url) => {
             error: err.message,
           });
 
-          if (fs.existsSync(finalPath)) {
-            await fs.promises.unlink(finalPath);
-          }
-
           reject(err);
         }
       });
     });
 
   } catch (err) {
-    console.error("🔥 PROCESS ERROR:", err.message);
+    console.error("🔥 FINAL ERROR:", err.message);
 
     await ConversionModel.findByIdAndUpdate(id, {
       status: "failed",
