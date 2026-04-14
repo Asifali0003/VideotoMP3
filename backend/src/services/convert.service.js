@@ -9,7 +9,10 @@ import { getVideoMetadata } from "../utils/metaData.js";
 // ======================
 // 🔗 Normalize URL
 // ======================
+
+
 const normalizeYouTubeURL = (url) => {
+  console.log("🔥 NEW CODE DEPLOYED v2");
   if (url.includes("shorts")) {
     const id = url.split("shorts/")[1]?.split("?")[0];
     return `https://www.youtube.com/watch?v=${id}`;

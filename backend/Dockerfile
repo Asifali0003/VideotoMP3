@@ -21,5 +21,7 @@ COPY backend/ .
 # ✅ Ensure binaries are accessible
 RUN which yt-dlp && which ffmpeg
 
+RUN echo "build-$(date)"
+
 # ✅ Start worker
 CMD ["node", "src/workers/convert.worker.js"]
