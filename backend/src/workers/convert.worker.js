@@ -7,6 +7,7 @@ import connectDB from "../config/database.js";
 await connectDB();
 
 // ✅ Upstash Redis connection (optimized)
+console.log("🔗 REDIS URL:", process.env.REDIS_URL);
 const connection = new IORedis(process.env.REDIS_URL, {
   maxRetriesPerRequest: null,
   tls: {},
