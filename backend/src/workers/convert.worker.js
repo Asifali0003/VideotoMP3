@@ -3,18 +3,22 @@ import IORedis from "ioredis";
 import { processVideo } from "../services/convert.service.js";
 import connectDB from "../config/database.js";
 
-// ✅ Connect DB first
+// ✅ Connect DB
 await connectDB();
 
-// ✅ Upstash Redis connection
+// ✅ Upstash Redis connection (optimized)
 const connection = new IORedis(process.env.REDIS_URL, {
   maxRetriesPerRequest: null,
-  tls: {}, // 🔥 required for Upstash
+  tls: {},
+  enableReadyCheck: false, // 🔥 faster connection
 });
 
+// ✅ Worker
 const worker = new Worker(
-  "conversion", // MUST match queue name
+  "conversion",
   async (job) => {
+    const startTime = Date.now();
+
     try {
       const { id, url } = job.data;
 
@@ -22,46 +26,79 @@ const worker = new Worker(
         throw new Error("Invalid job data");
       }
 
+      console.log(`📥 Processing Job: ${job.id}`);
+
       await processVideo(id, url);
 
+      const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+      console.log(`✅ Job ${job.id} completed in ${duration}s`);
+
     } catch (err) {
-      console.log("❌ Worker processing error:", err.message);
-      throw err; // important for retry
+      console.error(`❌ Job ${job.id} failed:`, err.message);
+      throw err; // 🔁 allow retry
     }
   },
   {
     connection,
 
-    // 🔥 Production settings
-    concurrency: 2,
+    // 🔥 FREE-TIER OPTIMIZATION
+    concurrency: 1, // ❗ reduce Redis load
+
     limiter: {
-      max: 5,       // max jobs
-      duration: 1000, // per second
+      max: 2,        // ❗ reduce request burst
+      duration: 1000,
+    },
+
+    // 🔥 Reduce Redis usage
+    settings: {
+      stalledInterval: 30000, // check less often
+      maxStalledCount: 1,
     },
   }
 );
 
 console.log("🚀 Worker started and waiting for jobs...");
 
-// ✅ Events
+// ======================
+// ✅ EVENTS (Optimized)
+// ======================
+
 worker.on("ready", () => {
   console.log("🟢 Worker connected to Redis");
 });
 
 worker.on("active", (job) => {
-  console.log("🔥 Job started:", job.id);
+  console.log(`🔥 Started Job: ${job.id}`);
 });
 
 worker.on("completed", (job) => {
-  console.log("✅ Job completed:", job.id);
+  console.log(`🎉 Completed Job: ${job.id}`);
 });
 
 worker.on("failed", (job, err) => {
-  console.log("❌ Job failed:", job?.id, err.message);
+  console.error(`❌ Failed Job ${job?.id}:`, err.message);
 });
 
+// 🔥 IMPORTANT: Handle Redis errors gracefully
 worker.on("error", (err) => {
-  console.log("🚨 Worker error:", err.message);
+  console.error("🚨 Worker Redis Error:", err.message);
+
+  if (err.message.includes("max requests limit exceeded")) {
+    console.log("⚠️ Upstash limit reached — slowing down worker...");
+  }
+});
+
+// 🔥 Graceful shutdown (VERY IMPORTANT for Railway)
+process.on("SIGINT", async () => {
+  console.log("🛑 Shutting down worker...");
+  await worker.close();
+  process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+  console.log("🛑 Terminating worker...");
+  await worker.close();
+  process.exit(0);
 });
 
 export default worker;

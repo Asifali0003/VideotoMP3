@@ -13,8 +13,13 @@ export const convertAudio = async (url) => {
   try {
     const response = await api.post("/convert", { url });
     return response.data;
+    
   } catch (error) {
     console.error("convertAudio error:", error.response?.data || error.message);
+    console.log("❌ FULL ERROR:", error); // full object
+    console.log("❌ RESPONSE:", error.response); 
+    console.log("❌ DATA:", error.response?.data);
+    console.log("❌ STATUS:", error.response?.status);
     throw error;
   }
 };

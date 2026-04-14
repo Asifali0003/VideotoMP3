@@ -42,7 +42,7 @@ const useConvert = () => {
           setLoading(false);
           clearInterval(interval);
         }
-      }, 2000);
+      }, 8000);
 
     } catch (err) {
       setError(err.message || "Error");

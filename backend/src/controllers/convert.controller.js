@@ -2,7 +2,10 @@ import { conversionQueue } from "../config/queue.js";
 import ConversionModel from "../models/conversion.model.js";
 import { getVideoMetadata } from "../utils/metaData.js";
 
-// ✅ Normalize Shorts
+// ======================
+// 🔧 HELPERS
+// ======================
+
 const normalizeYouTubeURL = (url) => {
   if (url.includes("shorts")) {
     const id = url.split("shorts/")[1]?.split("?")[0];
@@ -11,7 +14,6 @@ const normalizeYouTubeURL = (url) => {
   return url;
 };
 
-// ✅ Basic URL validation
 const isValidURL = (url) => {
   try {
     new URL(url);
@@ -21,8 +23,14 @@ const isValidURL = (url) => {
   }
 };
 
+// ======================
+// 🚀 CONTROLLER
+// ======================
+
 export const convertVideo = async (req, res) => {
   try {
+    console.log("📡 API HIT");
+
     const { url } = req.body;
 
     // ❌ Validation
@@ -32,46 +40,39 @@ export const convertVideo = async (req, res) => {
 
     const cleanUrl = normalizeYouTubeURL(url);
 
-    // ✅ Platform detection
-    const platform =
-      cleanUrl.includes("youtube") || cleanUrl.includes("youtu.be")
-        ? "youtube"
-        : cleanUrl.includes("instagram")
-        ? "instagram"
-        : cleanUrl.includes("twitter") || cleanUrl.includes("x.com")
-        ? "twitter"
-        : "other";
-
-    // ✅ Prevent duplicate processing
+    // ✅ Prevent duplicate processing (IMPORTANT)
     const existing = await ConversionModel.findOne({
       videoUrl: cleanUrl,
-      status: "completed",
+      status: { $in: ["pending", "processing", "completed"] },
     });
 
     if (existing) {
+      console.log("♻️ Reusing existing job:", existing._id);
+
       return res.json({
-        status: "completed",
+        status: existing.status,
         id: existing._id,
-        fileUrl: existing.fileUrl,
+        fileUrl: existing.fileUrl || null,
       });
     }
 
-    // 🔥 Metadata (non-blocking safe)
+    // 🔥 Metadata (timeout safe)
     let meta = {};
     try {
       meta = await Promise.race([
         getVideoMetadata(cleanUrl),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("timeout")), 5000)
+          setTimeout(() => reject(new Error("timeout")), 4000)
         ),
       ]);
     } catch {
-      console.log("Metadata skipped (timeout)");
+      console.log("⚠️ Metadata skipped");
     }
 
+    // ✅ Create job in DB
     const job = await ConversionModel.create({
       videoUrl: cleanUrl,
-      platform,
+      platform: "youtube",
       title: meta.title || "",
       thumbnail: meta.thumbnail || "",
       duration: meta.duration || 0,
@@ -79,23 +80,24 @@ export const convertVideo = async (req, res) => {
       status: "pending",
     });
 
-    // ✅ Queue with retry + backoff
-    await conversionQueue.add(
-      "convert",
-      {
+    console.log("🆕 Job created:", job._id);
+
+    // ✅ Add to queue (SAFE)
+    try {
+      await conversionQueue.add("convert", {
         id: job._id.toString(),
         url: cleanUrl,
-      },
-      {
-        attempts: 3,
-        backoff: {
-          type: "exponential",
-          delay: 5000,
-        },
-        removeOnComplete: true,
-        removeOnFail: 100,
-      }
-    );
+      });
+    } catch (queueErr) {
+      console.error("🚨 Queue add failed:", queueErr.message);
+
+      await ConversionModel.findByIdAndUpdate(job._id, {
+        status: "failed",
+        error: "Queue error",
+      });
+
+      return res.status(500).json({ error: "Queue failed" });
+    }
 
     return res.json({
       status: "pending",
@@ -106,10 +108,17 @@ export const convertVideo = async (req, res) => {
     });
 
   } catch (err) {
-    console.log(err);
-    res.status(500).json({ error: "Server error" });
+    console.error("🔥 CONTROLLER ERROR:", err.message);
+
+    return res.status(500).json({
+      error: err.message, // 👈 show real error
+    });
   }
 };
+
+// ======================
+// 📊 STATUS API
+// ======================
 
 export const getStatus = async (req, res) => {
   try {
@@ -125,7 +134,9 @@ export const getStatus = async (req, res) => {
       error: job.error || null,
     });
 
-  } catch {
-    res.status(500).json({ error: "Server error" });
+  } catch (err) {
+    console.error("🔥 STATUS ERROR:", err.message);
+
+    res.status(500).json({ error: err.message });
   }
 };
