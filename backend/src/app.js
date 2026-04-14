@@ -9,9 +9,14 @@ const app = express();
 // 🔐 CORS CONFIG
 // ======================
 app.use(cors({
-  origin:  "https://videoto-mp-3.vercel.app", // later change to Vercel domain
+  origin: [
+    "http://localhost:5173",
+    "https://videoto-mp-3.vercel.app"
+  ],
   methods: ["GET", "POST", "PUT", "DELETE"],
 }));
+
+app.options("*", cors());
 
 app.use(express.json());
 
