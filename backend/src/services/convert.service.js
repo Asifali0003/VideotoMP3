@@ -9,10 +9,7 @@ import { getVideoMetadata } from "../utils/metaData.js";
 // ======================
 // 🔗 Normalize URL
 // ======================
-
-
 const normalizeYouTubeURL = (url) => {
-  console.log("🔥 NEW CODE DEPLOYED v2");
   if (url.includes("shorts")) {
     const id = url.split("shorts/")[1]?.split("?")[0];
     return `https://www.youtube.com/watch?v=${id}`;
@@ -34,7 +31,7 @@ export const processVideo = async (id, url) => {
     try {
       console.log("🔍 yt-dlp:", execSync("which yt-dlp").toString().trim());
       console.log("🔍 ffmpeg:", execSync("which ffmpeg").toString().trim());
-    } catch (err) {
+    } catch {
       throw new Error("yt-dlp or ffmpeg not installed");
     }
 
@@ -51,11 +48,11 @@ export const processVideo = async (id, url) => {
       meta = await Promise.race([
         getVideoMetadata(cleanUrl),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Metadata timeout")), 5000)
+          setTimeout(() => reject(new Error("Metadata timeout")), 10000)
         ),
       ]);
-    } catch {
-      console.log("⚠️ Metadata skipped");
+    } catch (err) {
+      console.log("⚠️ Metadata skipped:", err.message);
     }
 
     await ConversionModel.findByIdAndUpdate(id, {
@@ -66,15 +63,15 @@ export const processVideo = async (id, url) => {
     });
 
     // ======================
-    // 📦 Setup paths
+    // 📦 Output path
     // ======================
     const outputTemplate = path.join(downloadsDir, `${id}.%(ext)s`);
 
-    // ======================
-    // 🔥 Spawn yt-dlp
-    // ======================
     console.log("⬇️ Starting download...");
 
+    // ======================
+    // 🔥 yt-dlp PROCESS (FIXED)
+    // ======================
     const processDl = spawn("yt-dlp", [
       "-x",
       "--audio-format", "mp3",
@@ -83,8 +80,13 @@ export const processVideo = async (id, url) => {
       "--restrict-filenames",
       "--force-ipv4",
       "--no-check-certificates",
-      "--ffmpeg-location", "ffmpeg",
-      "-o", outputTemplate,
+
+      // 🔥 BYPASS YOUTUBE BLOCK
+      "--extractor-args",
+      "youtube:player_client=android",
+
+      "-o",
+      outputTemplate,
       cleanUrl,
     ]);
 
@@ -139,26 +141,24 @@ export const processVideo = async (id, url) => {
 
         try {
           // ======================
-          // 🔥 FIND DOWNLOADED FILE
+          // 🔥 FIND FILE
           // ======================
           const files = await fs.promises.readdir(downloadsDir);
-
-          const audioFile = files.find((file) => file.startsWith(id));
+          const audioFile = files.find((f) => f.startsWith(id));
 
           if (!audioFile) {
-            throw new Error("Audio file not found after download");
+            throw new Error("Audio file not found");
           }
 
           const finalPath = path.join(downloadsDir, audioFile);
-
           console.log("📁 Found file:", finalPath);
 
           const fileBuffer = await fs.promises.readFile(finalPath);
 
           // ======================
-          // ☁️ Upload to ImageKit
+          // ☁️ Upload
           // ======================
-          console.log("☁️ Uploading to ImageKit...");
+          console.log("☁️ Uploading...");
 
           const response = await imagekit.upload({
             file: fileBuffer,
