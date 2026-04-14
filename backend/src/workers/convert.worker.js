@@ -3,18 +3,45 @@ import IORedis from "ioredis";
 import { processVideo } from "../services/convert.service.js";
 import connectDB from "../config/database.js";
 
-// ✅ Connect DB
-await connectDB();
-
-// ✅ Upstash Redis connection (optimized)
-console.log("🔗 REDIS URL:", process.env.REDIS_URL);
-const connection = new IORedis(process.env.REDIS_URL, {
-  maxRetriesPerRequest: null,
-  tls: {},
-  enableReadyCheck: false, // 🔥 faster connection
+// ======================
+// 🔥 GLOBAL ERROR HANDLING (IMPORTANT)
+// ======================
+process.on("uncaughtException", (err) => {
+  console.error("🔥 UNCAUGHT EXCEPTION:", err);
 });
 
-// ✅ Worker
+process.on("unhandledRejection", (err) => {
+  console.error("🔥 UNHANDLED REJECTION:", err);
+});
+
+// ======================
+// ✅ ENV VALIDATION
+// ======================
+if (!process.env.REDIS_URL) {
+  throw new Error("❌ REDIS_URL is missing in environment variables");
+}
+
+// ======================
+// ✅ CONNECT DB
+// ======================
+await connectDB();
+
+// ======================
+// 🔗 REDIS CONNECTION
+// ======================
+console.log("🔗 REDIS URL:", process.env.REDIS_URL);
+
+const connection = new IORedis(process.env.REDIS_URL, {
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+
+  // ✅ Only enable TLS if needed (Upstash)
+  tls: process.env.REDIS_URL.startsWith("rediss://") ? {} : undefined,
+});
+
+// ======================
+// 🚀 WORKER SETUP
+// ======================
 const worker = new Worker(
   "conversion",
   async (job) => {
@@ -42,17 +69,18 @@ const worker = new Worker(
   {
     connection,
 
-    // 🔥 FREE-TIER OPTIMIZATION
-    concurrency: 1, // ❗ reduce Redis load
+    // ======================
+    // 🔥 FREE TIER OPTIMIZATION
+    // ======================
+    concurrency: 1, // reduce load
 
     limiter: {
-      max: 2,        // ❗ reduce request burst
+      max: 2,        // max 2 jobs/sec
       duration: 1000,
     },
 
-    // 🔥 Reduce Redis usage
     settings: {
-      stalledInterval: 30000, // check less often
+      stalledInterval: 30000,
       maxStalledCount: 1,
     },
   }
@@ -61,9 +89,8 @@ const worker = new Worker(
 console.log("🚀 Worker started and waiting for jobs...");
 
 // ======================
-// ✅ EVENTS (Optimized)
+// ✅ EVENTS
 // ======================
-
 worker.on("ready", () => {
   console.log("🟢 Worker connected to Redis");
 });
@@ -80,16 +107,18 @@ worker.on("failed", (job, err) => {
   console.error(`❌ Failed Job ${job?.id}:`, err.message);
 });
 
-// 🔥 IMPORTANT: Handle Redis errors gracefully
+// 🔥 FULL ERROR LOG
 worker.on("error", (err) => {
-  console.error("🚨 Worker Redis Error:", err.message);
+  console.error("🚨 FULL WORKER ERROR:", err);
 
-  if (err.message.includes("max requests limit exceeded")) {
-    console.log("⚠️ Upstash limit reached — slowing down worker...");
+  if (err.message?.includes("max requests limit exceeded")) {
+    console.log("⚠️ Upstash limit reached — slow down jobs");
   }
 });
 
-// 🔥 Graceful shutdown (VERY IMPORTANT for Railway)
+// ======================
+// 🛑 GRACEFUL SHUTDOWN
+// ======================
 process.on("SIGINT", async () => {
   console.log("🛑 Shutting down worker...");
   await worker.close();

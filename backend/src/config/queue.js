@@ -1,30 +1,48 @@
 import { Queue } from "bullmq";
 import IORedis from "ioredis";
 
-// ✅ Optimized Upstash connection
+// ======================
+// ✅ ENV VALIDATION
+// ======================
+if (!process.env.REDIS_URL) {
+  throw new Error("❌ REDIS_URL is missing in environment variables");
+}
+
+// ======================
+// 🔗 REDIS CONNECTION (SAFE)
+// ======================
+console.log("🔗 QUEUE REDIS:", process.env.REDIS_URL);
+
 const connection = new IORedis(process.env.REDIS_URL, {
   maxRetriesPerRequest: null,
-  tls: {},
-  enableReadyCheck: false, // 🔥 faster + fewer checks
+  enableReadyCheck: false,
+
+  // ✅ FIX: only enable TLS when needed
+  tls: process.env.REDIS_URL.startsWith("rediss://") ? {} : undefined,
 });
 
-// ✅ Queue with optimized settings
+// ======================
+// 🚀 QUEUE SETUP
+// ======================
 export const conversionQueue = new Queue("conversion", {
   connection,
 
   defaultJobOptions: {
-    removeOnComplete: true, // 🔥 saves Redis memory
-    removeOnFail: 50,       // keep only last 50 failures
+    removeOnComplete: true,   // ✅ save Redis memory
+    removeOnFail: 50,         // keep only last failures
 
-    attempts: 2, // ❗ reduce retries (was 3)
+    attempts: 2,              // ✅ reduce retries (free tier friendly)
+
     backoff: {
       type: "exponential",
-      delay: 3000, // 🔥 smaller delay
+      delay: 3000,
     },
   },
 });
 
-// 🔥 Optional: log queue errors
+// ======================
+// ⚠️ ERROR HANDLING
+// ======================
 conversionQueue.on("error", (err) => {
-  console.error("🚨 Queue Error:", err.message);
+  console.error("🚨 QUEUE ERROR:", err);
 });
